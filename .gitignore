@@ -1,5 +1,72 @@
+# Task workspaces and generated results
+jobs/
+manifest.json
+video.log
+subtitles.log
+subtitle-review.md
+correction-report.md
+transcript*.txt
+subtitles*.srt
+platform*.srt
+
+# Downloaded media and subtitle files
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+*.srt
+*.vtt
+*.ass
+*.lrc
+*.part
+*.ytdl
+
+# Browser sessions, API secrets, and local credentials
+.env
+.env.*
+!.env.example
+browser-cookies.txt
+cookies.txt
+*.cookies
+*.cookie
+credentials.json
+client_secret*.json
+token.json
+*.pem
+*.key
+
+# Generated documents may contain private transcript content
+*.docx
+*.pdf
+
+# Whisper model weights
+*.pt
+
+# Python environments, caches, and build artifacts
 __pycache__/
 *.py[cod]
 .pytest_cache/
-jobs/
+.coverage
+htmlcov/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Local editor, OS, and Codex metadata
+.vscode/
+.idea/
+.codex/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
 
