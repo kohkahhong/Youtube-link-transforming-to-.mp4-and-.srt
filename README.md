@@ -162,4 +162,3 @@ py -m video_agent.review_gui --job-dir "jobs\20260815-163627-68ed99"
 - `subtitles.log` 是诊断日志，不是字幕成品。
 - 新任务会统一使用 UTF-8；`transcript.txt` 使用 UTF-8 BOM，避免旧版 Windows
   编辑器误判为 GBK 后出现“锟斤拷”。
-
