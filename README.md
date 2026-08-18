@@ -1,5 +1,612 @@
 # Video Content Agent
 
+[English](#english) | [中文](#中文)
+
+<a id="english"></a>
+
+## English
+
+Turn a YouTube or Douyin URL into a local, reviewable content package:
+
+- a standard `video.mp4` file;
+- a timestamped `subtitles.srt` file;
+- a readable `transcript.txt` without timestamps;
+- an optional AI-assisted subtitle correction and human approval workflow.
+
+This project is designed for **personal, local, Windows-first use**. It is not an online video service and it is more than a collection of download commands. Each URL becomes an isolated job with two processing branches, durable output files, diagnostic logs, and a machine-readable status manifest.
+
+> The current version implements MP4 download, platform subtitle extraction, Whisper fallback transcription, optional AI correction, and human subtitle approval. Structured article generation, Word export, original social-post generation, and mobile access are planned milestones rather than completed features.
+
+### English contents
+
+- [What the project does](#what-the-project-does)
+- [How the pipeline works](#how-the-pipeline-works)
+- [Requirements](#requirements)
+- [Installation and environment checks](#installation-and-environment-checks)
+- [Five-minute quick start](#five-minute-quick-start)
+- [YouTube workflow](#youtube-workflow)
+- [Douyin workflow](#douyin-workflow)
+- [Subtitle review and AI correction](#subtitle-review-and-ai-correction)
+- [Output files](#output-files)
+- [Job states](#job-states)
+- [Troubleshooting](#troubleshooting)
+- [Project structure](#project-structure)
+- [Testing and development](#testing-and-development)
+- [Privacy, security, and usage boundaries](#privacy-security-and-usage-boundaries)
+- [Roadmap](#roadmap)
+
+### What the project does
+
+#### 1. Download video and normalize the result to MP4
+
+The pipeline uses `yt-dlp` to resolve a YouTube or Douyin URL. FFmpeg then merges separate audio and video streams, or remuxes the downloaded media when necessary, with the goal of producing:
+
+```text
+video.mp4
+```
+
+Remuxing is not the same as re-encoding. In plain language, it places existing audio and video streams into an MP4 container without compressing them again. This is usually faster and avoids an additional generation of quality loss.
+
+#### 2. Prefer platform subtitles, then fall back to speech recognition
+
+The subtitle branch first asks the platform whether a separate subtitle track is available.
+
+- If a subtitle track exists, the pipeline downloads and converts it to SRT.
+- If no separate track exists, the pipeline waits for the MP4 and asks local Whisper to transcribe the audio.
+- If text is visible in the picture but no subtitle track is exposed, the text is probably burned into the pixels. See [Why visible captions may not be downloadable](#why-visible-captions-may-not-be-downloadable).
+
+The normalized subtitle output is:
+
+```text
+subtitles.srt
+```
+
+#### 3. Keep the video and subtitle branches independent
+
+A subtitle failure does not delete a successfully downloaded MP4. A video failure does not delete a subtitle track that was already retrieved. When only part of a job succeeds, the manifest uses `PARTIAL_FAILURE` instead of discarding useful output.
+
+#### 4. Treat AI output as a draft
+
+Automatic speech recognition can mishear names, places, dates, numbers, homophones, and specialist vocabulary. The optional AI correction stage can use full-topic context to propose corrections, but it follows strict file-safety rules:
+
+- the original `subtitles.srt` is preserved;
+- the AI draft is written to `subtitles.ai.srt`;
+- changes are documented in `correction-report.md`;
+- no downstream content generation starts without human approval.
+
+#### 5. Require an explicit human decision
+
+The Windows review window can open the video, original subtitles, AI draft, and correction report. After editing and saving, the reviewer may postpone, reject the draft, or approve it.
+
+Approval produces:
+
+```text
+subtitles.approved.srt
+transcript.approved.txt
+```
+
+### How the pipeline works
+
+```mermaid
+flowchart TD
+    A["Submit a YouTube or Douyin URL"] --> B["Detect the platform and create a job directory"]
+    B --> C["Video branch"]
+    B --> D["Subtitle branch"]
+
+    C --> E["Download media with yt-dlp"]
+    E --> F["Merge or remux with FFmpeg"]
+    F --> G["video.mp4"]
+
+    D --> H["Probe platform subtitle tracks"]
+    H -->|"Track exists"| I["Download and convert to SRT"]
+    H -->|"No track"| J["Wait for video.mp4"]
+    J --> K["Transcribe audio with Whisper"]
+    I --> L["subtitles.srt"]
+    K --> L
+
+    G --> M["Wait for subtitle review"]
+    L --> M
+    M --> N["Optional contextual AI correction"]
+    N --> O["Human review against the video"]
+    O -->|"Approve"| P["SRT_APPROVED"]
+    O -->|"Reject or postpone"| M
+    P --> Q["Next milestones: structured text, Word, social posts"]
+```
+
+The durable part of this design is not one particular download command. It is the job model: every run has isolated files and a `manifest.json` that records what happened. That makes the same core engine suitable for a future web interface, bot, or queue.
+
+### Requirements
+
+#### Recommended environment
+
+- Windows 10 or Windows 11;
+- Windows PowerShell 5.1 or PowerShell 7;
+- Python 3.11;
+- a network connection that can access the source video page;
+- enough disk space for videos and Whisper model weights.
+
+The project metadata requires Python `>=3.11`. Whisper's official documentation primarily states compatibility through Python 3.11. Newer Python versions may work, but if PyTorch, `tiktoken`, or model dependencies fail, using Python 3.11 is usually more reliable than repeatedly patching a newer environment.
+
+#### What each dependency does
+
+| Dependency | Technical role | Plain-language role |
+| --- | --- | --- |
+| Python | Runs the orchestration code | The pipeline coordinator |
+| `yt-dlp` | Resolves URLs and downloads media/subtitles | Talks to the video platform |
+| FFmpeg / ffprobe | Merges, remuxes, and inspects media | Packages audio and video into MP4 |
+| OpenAI Whisper | Automatic speech recognition (ASR) | Listens when the platform has no subtitle file |
+| OpenAI API (optional) | Context-aware subtitle correction | Proposes corrections before human review |
+
+### Installation and environment checks
+
+#### 1. Clone the project
+
+```powershell
+git clone "https://github.com/kohkahhong/Youtube-link-transforming-to-.mp4-and-.srt.git"
+cd "Youtube-link-transforming-to-.mp4-and-.srt"
+```
+
+#### 2. Install the Python packages
+
+Python 3.11 is recommended:
+
+```powershell
+py -3.11 -m pip install --upgrade pip
+py -3.11 -m pip install -U "yt-dlp[default]" openai-whisper
+py -3.11 -m pip install -e .
+```
+
+If the computer has only one Python installation, replace `py -3.11` with `py`.
+
+Video platforms change frequently. When extraction suddenly stops working, update `yt-dlp` before changing the project code:
+
+```powershell
+py -m pip install -U "yt-dlp[default]"
+```
+
+#### 3. Install FFmpeg
+
+The project needs the real FFmpeg command-line program, not a similarly named Python package. On Windows, install it with Chocolatey or Scoop:
+
+```powershell
+choco install ffmpeg
+```
+
+or:
+
+```powershell
+scoop install ffmpeg
+```
+
+#### 4. Verify the environment
+
+Close and reopen PowerShell, then run:
+
+```powershell
+py --version
+yt-dlp --version
+ffmpeg -version
+py -m whisper --help
+```
+
+All four commands should return a version or help text. “Command not recognized” usually means the dependency is missing, installed into another Python environment, or not available through `PATH`.
+
+### Five-minute quick start
+
+#### 1. Open the project directory
+
+```powershell
+cd "YOUR_PROJECT_DIRECTORY\Youtube-link-transforming-to-.mp4-and-.srt"
+```
+
+#### 2. Submit a URL
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\run.ps1" `
+  -Url "YOUTUBE_OR_DOUYIN_URL" `
+  -Language "zh"
+```
+
+#### 3. Note the generated job ID
+
+The program prints an ID similar to:
+
+```text
+20260815-163627-68ed99
+```
+
+Its files are stored under:
+
+```text
+jobs\20260815-163627-68ed99\
+```
+
+#### 4. Open the review window
+
+Replace the example ID with your own:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\review.ps1" `
+  -JobDir "20260815-163627-68ed99" `
+  -Interactive
+```
+
+#### 5. Approve the subtitles
+
+Play the video, open the review draft, save any edits, and click **Approve and continue**. Verify that the approved file exists:
+
+```powershell
+Test-Path ".\jobs\20260815-163627-68ed99\subtitles.approved.srt"
+```
+
+`True` means the final approved subtitle file was created.
+
+### YouTube workflow
+
+Public YouTube URLs usually work without browser cookies:
+
+```powershell
+.\run.ps1 `
+  -Url "https://youtu.be/VIDEO_ID" `
+  -Language "zh" `
+  -WhisperModel "base"
+```
+
+Messages such as the following do not mean that the video download failed:
+
+```text
+has no automatic captions
+has no subtitles
+```
+
+They only mean that YouTube did not expose a separate subtitle track. If `video.mp4` is available, the pipeline automatically falls back to Whisper.
+
+### Douyin workflow
+
+Douyin often requires fresh browser cookies, even when the browser session is not logged in. A dedicated Firefox session is the most practical option on Windows:
+
+1. Open the Douyin short URL in Firefox.
+2. Wait until the video plays normally.
+3. Complete any verification challenge.
+4. Close every Firefox window.
+5. Confirm that no `firefox.exe` process remains.
+6. Run:
+
+```powershell
+.\run.ps1 `
+  -Url "https://v.douyin.com/YOUR_SHORT_URL/" `
+  -Language "zh" `
+  -WhisperModel "base" `
+  -CookiesFromBrowser "firefox"
+```
+
+Closing only the Douyin tab is not enough. While the browser is running, its cookie database may remain locked and cannot be copied safely.
+
+#### Why Chrome and Edge may fail
+
+On Windows, Chrome and Edge cookies may be blocked by a running browser process or Chromium's DPAPI/App-Bound encryption. Typical errors include:
+
+```text
+Could not copy Chrome cookie database
+Failed to decrypt with DPAPI
+```
+
+You do not need to close important daily-work tabs repeatedly. Keep using Chrome normally and reserve Firefox for the Douyin download session.
+
+### Subtitle review and AI correction
+
+#### Generate readable review artifacts
+
+```powershell
+.\review.ps1 -JobDir "YOUR_JOB_ID"
+```
+
+This creates:
+
+```text
+transcript.txt
+subtitle-review.md
+```
+
+#### Generate an optional AI correction draft
+
+```powershell
+.\review.ps1 `
+  -JobDir "YOUR_JOB_ID" `
+  -UseAI `
+  -Context "topic, people, places, and specialist vocabulary"
+```
+
+Context matters. For a Chinese geography video about typhoon rainfall in Henan, useful context might include:
+
+```text
+Henan, typhoon rainfall, meteorology, Taihang Mountains, Funiu Mountains, moisture transport
+```
+
+The AI stage creates separate review files:
+
+```text
+subtitles.ai.srt
+transcript.ai.txt
+correction-report.md
+```
+
+If `OPENAI_API_KEY` is not set, the PowerShell script asks for it through a hidden input prompt. The value is used only in the current process and removed afterward; it is not written into the job directory.
+
+#### Open the Windows review window
+
+```powershell
+.\review.ps1 -JobDir "YOUR_JOB_ID" -Interactive
+```
+
+Recommended review order:
+
+1. Play the video.
+2. Open the candidate subtitles.
+3. Check names, places, dates, numbers, units, and technical terms.
+4. Edit in Notepad and save with `Ctrl + S`.
+5. Review `correction-report.md`.
+6. Return to the window and approve the draft.
+
+If the review window does not appear, run it directly in STA mode:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Sta `
+  -File ".\review-window.ps1" `
+  -JobDir ".\jobs\YOUR_JOB_ID"
+```
+
+If Python's Tk components are available, an advanced cue-by-cue comparison editor is also included:
+
+```powershell
+py -m video_agent.review_gui --job-dir "jobs\YOUR_JOB_ID"
+```
+
+#### Approve through the command line
+
+After manually reviewing and saving the AI draft:
+
+```powershell
+.\review.ps1 `
+  -JobDir "YOUR_JOB_ID" `
+  -InputSrt "subtitles.ai.srt" `
+  -Approve
+```
+
+The job moves to `SRT_APPROVED` and creates:
+
+```text
+subtitles.approved.srt
+transcript.approved.txt
+```
+
+#### Open the review window automatically for a new job
+
+```powershell
+.\run.ps1 `
+  -Url "URL" `
+  -Language "zh" `
+  -CookiesFromBrowser "firefox" `
+  -OpenReviewWindow
+```
+
+This is the project's own content-review interface. Codex system approval dialogs are intended for sandbox, network, and external side-effect permissions; an ordinary PowerShell script cannot reuse them for subtitle decisions.
+
+### Output files
+
+Each job lives under `jobs/<job-id>/`, so separate runs do not overwrite one another.
+
+| File | Purpose | Should it be edited manually? |
+| --- | --- | --- |
+| `video.mp4` | Final MP4 video | No |
+| `subtitles.srt` | Platform or Whisper source subtitles | Preserve as the original |
+| `transcript.txt` | Source transcript without timestamps | Safe to read and copy |
+| `subtitle-review.md` | Review instructions | No |
+| `subtitles.ai.srt` | AI correction draft | Yes, during review |
+| `transcript.ai.txt` | Plain-text AI draft | Normally generated automatically |
+| `correction-report.md` | List of proposed corrections | Use it for verification |
+| `subtitles.approved.srt` | Human-approved final subtitles | Downstream source of truth |
+| `transcript.approved.txt` | Human-approved final transcript | Input for later content processing |
+| `manifest.json` | Machine-readable job state | Avoid manual edits |
+| `video.log` | Video download diagnostics | Read when troubleshooting |
+| `subtitles.log` | Subtitle/transcription diagnostics | This is not a subtitle file |
+
+#### What is SRT?
+
+SRT is a widely supported external subtitle format. Each cue contains an index, start time, end time, and text:
+
+```srt
+1
+00:00:00,000 --> 00:00:03,200
+Why can inland Henan still receive typhoon-related rainfall?
+```
+
+The correct extension is `.srt`, not `.crt`.
+
+### Job states
+
+| State | Meaning | Next action |
+| --- | --- | --- |
+| `RECEIVED` | The URL has been accepted | Wait for processing |
+| `PROCESSING_MEDIA` | Video and platform subtitles are being processed | Keep the process running |
+| `TRANSCRIBING_WITH_WHISPER` | No platform subtitle exists; ASR is running | Wait for CPU/GPU processing |
+| `WAITING_SUBTITLE_REVIEW` | Source subtitles are ready | Start the review workflow |
+| `WAITING_AI_SUBTITLE_REVIEW` | The AI draft is ready | Verify and decide |
+| `SRT_APPROVED` | Subtitles have human approval | Continue to text organization |
+| `PARTIAL_FAILURE` | At least one branch failed | Inspect successful files and logs |
+
+### Troubleshooting
+
+#### Why visible captions may not be downloadable
+
+Text drawn directly into video pixels is called burned-in, hardcoded, or open captions. It looks like subtitles to a viewer, but the platform does not expose a separate subtitle file. `yt-dlp` can download subtitle tracks; it cannot automatically turn pixels into SRT. Whisper therefore transcribes the audio. Visual OCR may be added later as a cross-check, but is not enabled in the current pipeline.
+
+#### Is `FP16 is not supported on CPU; using FP32 instead` an error?
+
+No. Whisper did not find a compatible FP16 GPU path and switched to FP32 processing on the CPU. The job can still finish; it will usually run more slowly.
+
+#### Why does Whisper misrecognize some words?
+
+ASR quality is affected by accents, music, overlapping speakers, volume, speed, and specialist terms. Improve results in this order:
+
+1. Set `-Language "zh"` explicitly.
+2. Move from `base` to `small`.
+3. Provide accurate topic context to AI correction.
+4. Compare critical cues against the video.
+5. Always verify names, dates, numbers, and places.
+
+`small` is often more accurate than `base`, but substantially slower on a CPU:
+
+```powershell
+.\run.ps1 -Url "URL" -Language "zh" -WhisperModel "small"
+```
+
+#### Why is TXT garbled while SRT looks correct?
+
+The editor probably guessed GBK/ANSI instead of UTF-8. Current text outputs use UTF-8 with a BOM where Windows compatibility matters. Open older files explicitly as UTF-8 in VS Code or a modern Notepad and save them again.
+
+Do not confuse these files:
+
+- `transcript.txt` is readable transcript content;
+- `subtitles.log` is a diagnostic log.
+
+#### What does `Fresh cookies are needed` mean?
+
+Douyin rejected the request because it did not contain a sufficiently fresh browser session. Play the URL in Firefox, complete verification, fully exit Firefox, and rerun with:
+
+```powershell
+-CookiesFromBrowser "firefox"
+```
+
+#### What should I do about `Could not copy ... cookie database`?
+
+Close every window for that browser and confirm the process has exited. If you do not want to close normal Chrome work, use a dedicated Firefox session.
+
+#### What should I do about `Failed to decrypt with DPAPI`?
+
+This is a Windows Chromium cookie decryption limitation. Prefer Firefox. Do not copy or upload an entire browser profile to work around it.
+
+#### What does a Whisper SHA256 checksum mismatch mean?
+
+The model file may be incomplete or altered by a proxy/cache. Do not delete the whole model cache. Locate the exact `.pt` file named by the active Python/Whisper environment, remove only that one file, and retry the download. If `Test-Path` returns `False`, you checked the wrong cache path.
+
+#### Is `PARTIAL_FAILURE` success or failure?
+
+It means the job is incomplete, not useless. Check `branches.video.status` and `branches.subtitles.status` in `manifest.json`. A `READY` video remains usable even if the subtitle branch failed.
+
+### Project structure
+
+```text
+video-content-agent/
+├─ run.ps1                     # Main media-processing entry point
+├─ review.ps1                  # Review artifacts, AI correction, and approval
+├─ review-window.ps1           # Native Windows review window
+├─ pyproject.toml              # Python metadata and command entry point
+├─ IMPLEMENTATION_PLAN.md      # Milestones and acceptance criteria
+├─ video_agent/
+│  ├─ cli.py                   # CLI arguments and job entry point
+│  ├─ pipeline.py              # Download, subtitle probe, Whisper fallback, state
+│  ├─ subtitles.py             # SRT, encoding, AI correction, reports
+│  ├─ review_cli.py            # Command-line review flow
+│  └─ review_gui.py            # Advanced cue-by-cue review UI
+├─ tests/
+│  └─ test_pipeline.py         # Unit tests
+└─ jobs/                       # Local private results; ignored by Git
+```
+
+The `jobs/` directory is excluded from Git because it may contain videos, subtitles, cookie snapshots, logs, and private content-processing history.
+
+### Testing and development
+
+Run the unit tests:
+
+```powershell
+py -m unittest discover -s tests -v
+```
+
+Validate review-window inputs without showing the window:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\review-window.ps1" `
+  -JobDir ".\jobs\YOUR_JOB_ID" `
+  -CheckOnly
+```
+
+Core design constraints:
+
+- never delete one branch's successful output because another branch failed;
+- never overwrite source subtitles with an AI draft;
+- never enter content generation without human approval;
+- never commit cookies, API keys, or job media;
+- keep recoverable job state in `manifest.json`.
+
+### Privacy, security, and usage boundaries
+
+- Process only material you are authorized to access, download, and use, and follow applicable platform terms and rules.
+- Browser cookies are session credentials. Never upload, commit, or share them.
+- Never write an OpenAI API key into scripts, documentation, job directories, or Git history.
+- AI correction is not a factual guarantee; verify important content manually.
+- Platform extractors may break when source websites change.
+
+The repository does not currently include a separate open-source license. Public visibility alone does not automatically grant permission to copy, modify, or redistribute the project. Add a clear `LICENSE` before inviting open-source reuse.
+
+### Roadmap
+
+#### Completed: local media and subtitle workflow
+
+- [x] Recognize YouTube, `youtu.be`, Douyin, and Douyin short URLs.
+- [x] Create an isolated job directory for each URL.
+- [x] Process MP4 and subtitle branches independently.
+- [x] Prefer platform subtitles and fall back to Whisper.
+- [x] Write UTF-8 SRT and readable transcript files.
+- [x] Support a Firefox cookie snapshot workflow.
+- [x] Preserve logs and partial success.
+- [x] Generate AI correction drafts and reports.
+- [x] Provide Windows review, approval, and rejection.
+- [x] Produce final approved subtitles and transcript.
+
+#### Next: structured full-text output
+
+- [ ] Ask whether the user wants content organization.
+- [ ] Generate sections, bullet points, bold keywords, and headings.
+- [ ] Keep a full organized version separate from summaries.
+- [ ] Support chat text, Markdown, and Word output.
+- [ ] Add a `WAITING_CONTENT_REVIEW` state.
+
+#### Later: original insight-style social posts
+
+- [ ] Use only human-approved content.
+- [ ] Support Chinese and English.
+- [ ] Support a single post or a thread.
+- [ ] Start with a strong but non-deceptive opinion hook.
+- [ ] Avoid observer language such as “this video says.”
+- [ ] Produce measured, sharp, and high-engagement variants.
+- [ ] Require human review before publishing.
+
+#### Longer term: mobile entry point and task queue
+
+- [ ] Submit URLs from a mobile webpage or private chat bot.
+- [ ] Queue jobs while the computer is offline and resume later.
+- [ ] Review status, subtitles, and results from a phone.
+- [ ] Use the same job format for local and optional cloud workers.
+- [ ] Package the core workflow as a Codex Skill or plugin.
+
+See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for milestone acceptance criteria.
+
+### References
+
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — URL extraction, media downloading, subtitle tracks, and post-processing;
+- [OpenAI Whisper](https://github.com/openai/whisper) — multilingual automatic speech recognition;
+- [FFmpeg](https://ffmpeg.org/) — the media processing toolchain.
+
+If this is your first run, you do not need to understand every term. The shortest path is: run `run.ps1`, wait for MP4/SRT output, then open `review.ps1 -Interactive`. The rest of this document explains why the workflow behaves this way and where to look when something fails.
+
+---
+
+<a id="中文"></a>
+
+# 中文说明
+
 把一条 YouTube 或抖音视频链接，变成一套可以继续编辑、审核和再创作的本地素材：
 
 - 一份标准的 `video.mp4` 视频；
